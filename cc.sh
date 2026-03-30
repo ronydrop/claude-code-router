@@ -8,7 +8,53 @@ _cc_openrouter() {
     export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
     export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
     unset ANTHROPIC_API_KEY
-    echo "✓ OpenRouter"
+}
+
+_cc_pick_model() {
+    local B='\033[1m' C='\033[36m' Y='\033[33m' D='\033[2m' R='\033[0m'
+
+    # Carrega aliases
+    local names=() models=()
+    if [ -s "$_CC_RUN_FILE" ]; then
+        while IFS='=' read -r n m; do
+            names+=("$n"); models+=("$m")
+        done < "$_CC_RUN_FILE"
+    fi
+
+    printf "\n${B}Escolha o modelo OpenRouter${R}\n\n"
+    printf "  ${D}0)${R} padrao ${D}(sem override)${R}\n"
+    local i
+    for i in "${!names[@]}"; do
+        printf "  ${Y}%d)${R} %-14s ${D}%s${R}\n" "$((i+1))" "${names[$i]}" "${models[$i]}"
+    done
+    printf "  ${D}m)${R} digitar modelo manualmente\n"
+    printf "\n${C}>${R} "
+
+    local choice
+    read -r choice
+
+    case "$choice" in
+        0|"")
+            unset ANTHROPIC_MODEL
+            printf "${D}modelo padrao${R}\n"
+            ;;
+        m|M)
+            printf "modelo: "
+            read -r ANTHROPIC_MODEL
+            export ANTHROPIC_MODEL
+            printf "✓ ${ANTHROPIC_MODEL}\n"
+            ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ]; then
+                export ANTHROPIC_MODEL="${models[$((choice-1))]}"
+                printf "✓ ${names[$((choice-1))]} → ${ANTHROPIC_MODEL}\n"
+            else
+                printf "${D}opcao invalida, usando padrao${R}\n"
+                unset ANTHROPIC_MODEL
+            fi
+            ;;
+    esac
+    printf "\n"
 }
 
 _cc_oauth() {
@@ -128,7 +174,7 @@ _cc_help() {
 
 cc() {
     case "$1" in
-        or|openrouter) _cc_openrouter; claude ;;
+        or|openrouter) _cc_openrouter; _cc_pick_model; claude ;;
         oauth)  _cc_oauth ;;
         status) _cc_status ;;
         reset)  _cc_reset ;;
