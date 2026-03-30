@@ -10,6 +10,11 @@ _cc_openrouter() {
     unset ANTHROPIC_AUTH_TOKEN
 }
 
+# Lança claude em modo API key (sem conflito de auth OAuth)
+_cc_launch() {
+    CLAUDE_CODE_SIMPLE=1 claude "$@"
+}
+
 _cc_oauth() {
     unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
     echo "✓ OAuth (Claude direto)"
@@ -50,7 +55,7 @@ _cc_model() {
 }
 
 # ---- RUN ALIASES ----
-# Formato do arquivo: name=model|$input/$output  (custo por milhao de tokens, opcional)
+# Formato do arquivo: name=model  (precos buscados da API do OpenRouter dinamicamente)
 
 _CC_RUN_FILE="$HOME/.config/claude-code-router/run-aliases"
 
@@ -87,20 +92,45 @@ _cc_run_reorganize() {
     printf '%b' "$out" > "$_CC_RUN_FILE"
 }
 
-# Exibe aliases com seções de provider e coluna de custo
+# Busca precos da API OpenRouter: saida "model_id\tpreco\tcontexto" por linha
+_cc_or_prices() {
+    curl -s --max-time 6 "https://openrouter.ai/api/v1/models" \
+        ${OPENROUTER_API_KEY:+-H "Authorization: Bearer $OPENROUTER_API_KEY"} 2>/dev/null | \
+    python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for m in data.get('data', []):
+        p = m.get('pricing', {})
+        inp = float(p.get('prompt', 0)) * 1_000_000
+        out = float(p.get('completion', 0)) * 1_000_000
+        ctx = m.get('context_length', 0)
+        ctx_str = f'{ctx//1000}K' if ctx < 1_000_000 else f'{ctx//1_000_000}M'
+        print(m['id'] + '\t\$' + f'{inp:.2f}/\${out:.2f}/M' + '\t' + ctx_str)
+except: pass
+" 2>/dev/null
+}
+
+# Exibe aliases com secoes de provider, custo e contexto (buscado da API)
 _cc_print_aliases() {
-    local C='\033[36m' G='\033[32m' D='\033[2m' R='\033[0m'
+    local C='\033[36m' G='\033[32m' Y='\033[33m' D='\033[2m' R='\033[0m'
     if [ ! -s "$_CC_RUN_FILE" ]; then
         printf "  ${D}(nenhum alias)${R}\n"
         return
     fi
+    local prices
+    prices=$(_cc_or_prices)
     while IFS= read -r line; do
         if [[ "$line" =~ ^#[[:space:]]*(.+) ]]; then
             printf "  ${D}── %s${R}\n" "${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ ^([^=]+)=([^|]+)\|?(.*)$ ]]; then
-            local name="${BASH_REMATCH[1]}" model="${BASH_REMATCH[2]}" cost="${BASH_REMATCH[3]}"
+        elif [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+            local name="${BASH_REMATCH[1]}" model="${BASH_REMATCH[2]}"
+            local row cost ctx
+            row=$(printf '%s\n' "$prices" | grep "^${model}	")
+            cost=$(printf '%s' "$row" | cut -f2)
+            ctx=$(printf '%s' "$row" | cut -f3)
             if [ -n "$cost" ]; then
-                printf "  ${C}%-14s${R}  ${D}%-32s${R}  ${G}%s/M${R}\n" "$name" "$model" "$cost"
+                printf "  ${C}%-14s${R}  ${D}%-32s${R}  ${G}%-18s${R}  ${Y}%s${R}\n" "$name" "$model" "$cost" "$ctx"
             else
                 printf "  ${C}%-14s${R}  ${D}%s${R}\n" "$name" "$model"
             fi
@@ -111,14 +141,13 @@ _cc_print_aliases() {
 _cc_run() {
     case "$1" in
         add)
-            [ -z "$2" ] || [ -z "$3" ] && { echo "Uso: cc run add <nome> <modelo> [custo]"; return 1; }
-            local name="$2" model="$3" cost="$4"
-            local spec="$model"; [ -n "$cost" ] && spec="$model|$cost"
+            [ -z "$2" ] || [ -z "$3" ] && { echo "Uso: cc run add <nome> <modelo>"; return 1; }
+            local name="$2" model="$3"
             grep -v "^$name=" "$_CC_RUN_FILE" 2>/dev/null > "$_CC_RUN_FILE.tmp"
-            printf '%s=%s\n' "$name" "$spec" >> "$_CC_RUN_FILE.tmp"
+            printf '%s=%s\n' "$name" "$model" >> "$_CC_RUN_FILE.tmp"
             mv "$_CC_RUN_FILE.tmp" "$_CC_RUN_FILE"
             _cc_run_reorganize
-            echo "✓ run $name → $model${cost:+  ($cost/M)}"
+            echo "✓ run $name → $model"
             ;;
         rm)
             [ -z "$2" ] && { echo "Uso: cc run rm <nome>"; return 1; }
@@ -140,7 +169,7 @@ _cc_run() {
             [ -z "$spec" ] && spec="$1"
             model="${spec%%|*}"
             _cc_openrouter
-            ANTHROPIC_MODEL="$model" claude "${@:2}"
+            ANTHROPIC_MODEL="$model" _cc_launch "${@:2}"
             ;;
     esac
 }
@@ -148,17 +177,17 @@ _cc_run() {
 # ---- MODEL PICKER (cc or) ----
 
 _cc_pick_draw() {
-    local G='\033[32m' D='\033[2m' R='\033[0m'
+    local G='\033[32m' Y='\033[33m' D='\033[2m' R='\033[0m'
     local i
     for i in "${!_cc_pick_types[@]}"; do
         if [ "${_cc_pick_types[$i]}" = "header" ]; then
             printf "  ${D}── %s${R}\n" "${_cc_pick_names[$i]}"
         elif [ "$i" -eq "$_cc_pick_sel" ]; then
-            printf "  \033[36m▶ \033[1m%-14s\033[0m  \033[2m%-32s\033[0m  ${G}%s${R}\n" \
-                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}"
+            printf "  \033[36m▶ \033[1m%-14s\033[0m  \033[2m%-32s\033[0m  ${G}%-18s${R}  ${Y}%s${R}\n" \
+                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}" "${_cc_pick_ctxs[$i]}"
         else
-            printf "    %-14s  ${D}%-32s  %s${R}\n" \
-                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}"
+            printf "    %-14s  ${D}%-32s  %-18s  %s${R}\n" \
+                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}" "${_cc_pick_ctxs[$i]}"
         fi
     done
 }
@@ -176,22 +205,32 @@ _cc_pick_model() {
     _cc_pick_names=("padrao")
     _cc_pick_models=("sem override")
     _cc_pick_costs=("")
+    _cc_pick_ctxs=("")
     _cc_pick_values=("")
 
     if [ -s "$_CC_RUN_FILE" ]; then
+        local _prices
+        _prices=$(_cc_or_prices)
         while IFS= read -r line; do
             if [[ "$line" =~ ^#[[:space:]]*(.+) ]]; then
                 _cc_pick_types+=("header")
                 _cc_pick_names+=("${BASH_REMATCH[1]}")
                 _cc_pick_models+=("")
                 _cc_pick_costs+=("")
+                _cc_pick_ctxs+=("")
                 _cc_pick_values+=("")
-            elif [[ "$line" =~ ^([^=]+)=([^|]+)\|?(.*)$ ]]; then
+            elif [[ "$line" =~ ^([^=]+)=(.+)$ ]]; then
+                local _model="${BASH_REMATCH[2]}"
+                local _row _cost _ctx
+                _row=$(printf '%s\n' "$_prices" | grep "^${_model}	")
+                _cost=$(printf '%s' "$_row" | cut -f2)
+                _ctx=$(printf '%s' "$_row" | cut -f3)
                 _cc_pick_types+=("option")
                 _cc_pick_names+=("${BASH_REMATCH[1]}")
-                _cc_pick_models+=("${BASH_REMATCH[2]}")
-                _cc_pick_costs+=("${BASH_REMATCH[3]:+${BASH_REMATCH[3]}/M}")
-                _cc_pick_values+=("${BASH_REMATCH[2]}")
+                _cc_pick_models+=("$_model")
+                _cc_pick_costs+=("$_cost")
+                _cc_pick_ctxs+=("$_ctx")
+                _cc_pick_values+=("$_model")
             fi
         done < "$_CC_RUN_FILE"
     fi
@@ -200,6 +239,7 @@ _cc_pick_model() {
     _cc_pick_names+=("manual")
     _cc_pick_models+=("digitar modelo")
     _cc_pick_costs+=("")
+    _cc_pick_ctxs+=("")
     _cc_pick_values+=("__manual__")
 
     local count=${#_cc_pick_types[@]}
@@ -242,7 +282,7 @@ _cc_pick_model() {
         printf "✓ \033[36m%s\033[0m\n\n" "$chosen"
     fi
 
-    unset _cc_pick_types _cc_pick_names _cc_pick_models _cc_pick_costs _cc_pick_values _cc_pick_sel
+    unset _cc_pick_types _cc_pick_names _cc_pick_models _cc_pick_costs _cc_pick_ctxs _cc_pick_values _cc_pick_sel
 }
 
 # ---- HELP ----
@@ -278,7 +318,7 @@ _cc_help() {
 
 cc() {
     case "$1" in
-        or|openrouter) _cc_openrouter; _cc_pick_model; claude ;;
+        or|openrouter) _cc_openrouter; _cc_pick_model; _cc_launch ;;
         oauth)  _cc_oauth ;;
         status) _cc_status ;;
         reset)  _cc_reset ;;
@@ -308,18 +348,3 @@ _cc_completions() {
 }
 complete -F _cc_completions cc
 
-# ---- BACKWARD COMPAT ----
-
-cc-oauth()      { cc oauth; claude; }
-cc-or()         { cc or; }
-cc-openrouter() { cc or; }
-cc-status()     { cc status; }
-cc-check()      { cc status; }
-cc-reset()      { cc reset; }
-cc-minimax()    { cc run minimax "$@"; }
-cc-glm5()       { cc run glm5 "$@"; }
-cc-sonnet() {
-    [ -z "$1" ] && { echo "Uso: cc-sonnet <modelo>"; return 1; }
-    cc model sonnet "$1"
-    claude
-}
