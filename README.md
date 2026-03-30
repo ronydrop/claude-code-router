@@ -73,6 +73,10 @@ ai -r openai/gpt-4o-mini "ping" | wc -w
 ./uninstall.sh
 ```
 
+## Author
+
+[@rony_drop](https://www.instagram.com/rony_drop/)
+
 ## License
 
 MIT
