@@ -247,6 +247,7 @@ _cc_pick_model() {
 
     printf "\n\033[1mEscolha o modelo OpenRouter\033[0m\n\n"
     tput civis 2>/dev/null
+    tput sc 2>/dev/null
     _cc_pick_draw
 
     while true; do
@@ -261,7 +262,8 @@ _cc_pick_model() {
         elif [[ "$k" == "" ]]; then
             break
         fi
-        tput cuu "$count" 2>/dev/null
+        tput rc 2>/dev/null
+        tput ed 2>/dev/null
         _cc_pick_draw
     done
 
