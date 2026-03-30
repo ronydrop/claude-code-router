@@ -50,17 +50,20 @@ _cc_model() {
 }
 
 # ---- RUN ALIASES ----
+# Formato do arquivo: name=model|$input/$output  (custo por milhao de tokens, opcional)
 
 _CC_RUN_FILE="$HOME/.config/claude-code-router/run-aliases"
 
-# Reescreve o arquivo agrupado por provider (extraido do modelo)
+# Reescreve o arquivo agrupado por provider
 _cc_run_reorganize() {
     [ ! -f "$_CC_RUN_FILE" ] && return
     local pairs=()
-    while IFS='=' read -r n m; do
-        [[ "$n" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "$n" || -z "$m" ]] && continue
-        pairs+=("$m=$n")  # inverte pra sort por modelo/provider
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^([^=]+)=(.+)$ ]] || continue
+        local name="${BASH_REMATCH[1]}" spec="${BASH_REMATCH[2]}"
+        local model="${spec%%|*}"
+        pairs+=("$model	$name	$spec")  # tab-separated: sortkey, name, full spec
     done < "$_CC_RUN_FILE"
 
     [ ${#pairs[@]} -eq 0 ] && { > "$_CC_RUN_FILE"; return; }
@@ -68,23 +71,25 @@ _cc_run_reorganize() {
     IFS=$'\n' sorted=($(printf '%s\n' "${pairs[@]}" | sort)); unset IFS
 
     local out="" cur_provider=""
-    for pair in "${sorted[@]}"; do
-        local model="${pair%%=*}"
-        local name="${pair#*=}"
+    for entry in "${sorted[@]}"; do
+        local model="${entry%%	*}"
+        local rest="${entry#*	}"
+        local name="${rest%%	*}"
+        local spec="${rest#*	}"
         local provider="${model%%/*}"
         if [ "$provider" != "$cur_provider" ]; then
             [ -n "$cur_provider" ] && out+="\n"
             out+="# $provider\n"
             cur_provider="$provider"
         fi
-        out+="$name=$model\n"
+        out+="$name=$spec\n"
     done
     printf '%b' "$out" > "$_CC_RUN_FILE"
 }
 
-# Exibe aliases agrupados com headers de provider
+# Exibe aliases com seções de provider e coluna de custo
 _cc_print_aliases() {
-    local C='\033[36m' D='\033[2m' R='\033[0m'
+    local C='\033[36m' G='\033[32m' D='\033[2m' R='\033[0m'
     if [ ! -s "$_CC_RUN_FILE" ]; then
         printf "  ${D}(nenhum alias)${R}\n"
         return
@@ -92,8 +97,13 @@ _cc_print_aliases() {
     while IFS= read -r line; do
         if [[ "$line" =~ ^#[[:space:]]*(.+) ]]; then
             printf "  ${D}── %s${R}\n" "${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ ^([^=]+)=(.+) ]]; then
-            printf "  ${C}%-16s${R}  ${D}%s${R}\n" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ ^([^=]+)=([^|]+)\|?(.*)$ ]]; then
+            local name="${BASH_REMATCH[1]}" model="${BASH_REMATCH[2]}" cost="${BASH_REMATCH[3]}"
+            if [ -n "$cost" ]; then
+                printf "  ${C}%-14s${R}  ${D}%-32s${R}  ${G}%s/M${R}\n" "$name" "$model" "$cost"
+            else
+                printf "  ${C}%-14s${R}  ${D}%s${R}\n" "$name" "$model"
+            fi
         fi
     done < "$_CC_RUN_FILE"
 }
@@ -101,12 +111,14 @@ _cc_print_aliases() {
 _cc_run() {
     case "$1" in
         add)
-            [ -z "$2" ] || [ -z "$3" ] && { echo "Uso: cc run add <nome> <modelo>"; return 1; }
-            grep -v "^$2=" "$_CC_RUN_FILE" 2>/dev/null > "$_CC_RUN_FILE.tmp"
-            printf '%s=%s\n' "$2" "$3" >> "$_CC_RUN_FILE.tmp"
+            [ -z "$2" ] || [ -z "$3" ] && { echo "Uso: cc run add <nome> <modelo> [custo]"; return 1; }
+            local name="$2" model="$3" cost="$4"
+            local spec="$model"; [ -n "$cost" ] && spec="$model|$cost"
+            grep -v "^$name=" "$_CC_RUN_FILE" 2>/dev/null > "$_CC_RUN_FILE.tmp"
+            printf '%s=%s\n' "$name" "$spec" >> "$_CC_RUN_FILE.tmp"
             mv "$_CC_RUN_FILE.tmp" "$_CC_RUN_FILE"
             _cc_run_reorganize
-            echo "✓ run $2 → $3"
+            echo "✓ run $name → $model${cost:+  ($cost/M)}"
             ;;
         rm)
             [ -z "$2" ] && { echo "Uso: cc run rm <nome>"; return 1; }
@@ -119,12 +131,14 @@ _cc_run() {
             _cc_print_aliases
             ;;
         "")
-            echo "Uso: cc run <alias|modelo>  |  cc run add <nome> <modelo>  |  cc run rm <nome>  |  cc run list"
+            echo "Uso: cc run <alias|modelo>  |  cc run add <nome> <modelo> [custo]  |  cc run rm <nome>  |  cc run list"
             ;;
         *)
-            local model
-            model=$(grep "^$1=" "$_CC_RUN_FILE" 2>/dev/null | cut -d= -f2-)
-            [ -z "$model" ] && model="$1"
+            # extrai somente o model ID (antes do |)
+            local spec model
+            spec=$(grep "^$1=" "$_CC_RUN_FILE" 2>/dev/null | cut -d= -f2-)
+            [ -z "$spec" ] && spec="$1"
+            model="${spec%%|*}"
             _cc_openrouter
             ANTHROPIC_MODEL="$model" claude "${@:2}"
             ;;
@@ -134,16 +148,17 @@ _cc_run() {
 # ---- MODEL PICKER (cc or) ----
 
 _cc_pick_draw() {
+    local G='\033[32m' D='\033[2m' R='\033[0m'
     local i
     for i in "${!_cc_pick_types[@]}"; do
         if [ "${_cc_pick_types[$i]}" = "header" ]; then
-            printf "  \033[2m── %s\033[0m\n" "${_cc_pick_names[$i]}"
+            printf "  ${D}── %s${R}\n" "${_cc_pick_names[$i]}"
         elif [ "$i" -eq "$_cc_pick_sel" ]; then
-            printf "  \033[36m▶ \033[1m%-16s\033[0m  \033[2m%s\033[0m\n" \
-                "${_cc_pick_names[$i]}" "${_cc_pick_display[$i]}"
+            printf "  \033[36m▶ \033[1m%-14s\033[0m  \033[2m%-32s\033[0m  ${G}%s${R}\n" \
+                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}"
         else
-            printf "    %-16s  \033[2m%s\033[0m\n" \
-                "${_cc_pick_names[$i]}" "${_cc_pick_display[$i]}"
+            printf "    %-14s  ${D}%-32s  %s${R}\n" \
+                "${_cc_pick_names[$i]}" "${_cc_pick_models[$i]}" "${_cc_pick_costs[$i]}"
         fi
     done
 }
@@ -159,29 +174,33 @@ _cc_pick_move() {
 _cc_pick_model() {
     _cc_pick_types=("option")
     _cc_pick_names=("padrao")
+    _cc_pick_models=("sem override")
+    _cc_pick_costs=("")
     _cc_pick_values=("")
-    _cc_pick_display=("sem override")
 
     if [ -s "$_CC_RUN_FILE" ]; then
         while IFS= read -r line; do
             if [[ "$line" =~ ^#[[:space:]]*(.+) ]]; then
                 _cc_pick_types+=("header")
                 _cc_pick_names+=("${BASH_REMATCH[1]}")
+                _cc_pick_models+=("")
+                _cc_pick_costs+=("")
                 _cc_pick_values+=("")
-                _cc_pick_display+=("")
-            elif [[ "$line" =~ ^([^=]+)=(.+) ]]; then
+            elif [[ "$line" =~ ^([^=]+)=([^|]+)\|?(.*)$ ]]; then
                 _cc_pick_types+=("option")
                 _cc_pick_names+=("${BASH_REMATCH[1]}")
+                _cc_pick_models+=("${BASH_REMATCH[2]}")
+                _cc_pick_costs+=("${BASH_REMATCH[3]:+${BASH_REMATCH[3]}/M}")
                 _cc_pick_values+=("${BASH_REMATCH[2]}")
-                _cc_pick_display+=("${BASH_REMATCH[2]}")
             fi
         done < "$_CC_RUN_FILE"
     fi
 
     _cc_pick_types+=("option")
     _cc_pick_names+=("manual")
+    _cc_pick_models+=("digitar modelo")
+    _cc_pick_costs+=("")
     _cc_pick_values+=("__manual__")
-    _cc_pick_display+=("digitar modelo")
 
     local count=${#_cc_pick_types[@]}
     _cc_pick_sel=0
@@ -223,7 +242,7 @@ _cc_pick_model() {
         printf "✓ \033[36m%s\033[0m\n\n" "$chosen"
     fi
 
-    unset _cc_pick_types _cc_pick_names _cc_pick_values _cc_pick_display _cc_pick_sel
+    unset _cc_pick_types _cc_pick_names _cc_pick_models _cc_pick_costs _cc_pick_values _cc_pick_sel
 }
 
 # ---- HELP ----
@@ -238,10 +257,10 @@ _cc_help() {
     printf "  ${C}cc or${R}                  Ativa OpenRouter e abre Claude\n"
     printf "  ${C}cc run${R} <alias|modelo>  OpenRouter + modelo especifico\n\n"
 
-    printf "${B}Aliases de run${R}\n"
-    printf "  ${C}cc run add${R} <nome> <modelo>  Cria ou edita alias\n"
-    printf "  ${C}cc run rm${R} <nome>            Remove alias\n"
-    printf "  ${C}cc run list${R}                 Lista aliases\n"
+    printf "${B}Aliases de run${R}  ${D}(custo por milhao de tokens: input/output)${R}\n"
+    printf "  ${C}cc run add${R} <nome> <modelo> [custo]  Cria ou edita alias\n"
+    printf "  ${C}cc run rm${R} <nome>                    Remove alias\n"
+    printf "  ${C}cc run list${R}                         Lista aliases\n"
     _cc_print_aliases
     printf "\n"
 
@@ -280,7 +299,7 @@ _cc_completions() {
         model) COMPREPLY=($(compgen -W "sonnet opus haiku agent pack" -- "$cur")) ;;
         run)
             local aliases
-            aliases=$(grep -v '^#' "$HOME/.config/claude-code-router/run-aliases" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')
+            aliases=$(grep -v '^#' "$_CC_RUN_FILE" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')
             COMPREPLY=($(compgen -W "add rm list $aliases" -- "$cur"))
             ;;
         cc)    COMPREPLY=($(compgen -W "or oauth status reset model run help" -- "$cur")) ;;
