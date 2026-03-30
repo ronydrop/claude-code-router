@@ -6,12 +6,12 @@
 
 _cc_openrouter() {
     export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
-    export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
-    unset ANTHROPIC_API_KEY
+    export ANTHROPIC_API_KEY="$OPENROUTER_API_KEY"
+    unset ANTHROPIC_AUTH_TOKEN
 }
 
 _cc_oauth() {
-    unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+    unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
     echo "✓ OAuth (Claude direto)"
 }
 
@@ -24,7 +24,7 @@ _cc_reset() {
 
 _cc_status() {
     echo "provider:  ${ANTHROPIC_BASE_URL:-oauth}"
-    echo "token:     ${ANTHROPIC_AUTH_TOKEN:+[SET]}${ANTHROPIC_AUTH_TOKEN:-<unset>}"
+    echo "api_key:   ${ANTHROPIC_API_KEY:+[SET]}${ANTHROPIC_API_KEY:-<unset>}"
     echo "sonnet:    ${ANTHROPIC_DEFAULT_SONNET_MODEL:-<default>}"
     echo "opus:      ${ANTHROPIC_DEFAULT_OPUS_MODEL:-<default>}"
     echo "haiku:     ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-<default>}"
