@@ -10,51 +10,77 @@ _cc_openrouter() {
     unset ANTHROPIC_API_KEY
 }
 
-_cc_pick_model() {
-    local B='\033[1m' C='\033[36m' Y='\033[33m' D='\033[2m' R='\033[0m'
+_cc_draw_menu() {
+    local i
+    for i in "${!_cc_menu_names[@]}"; do
+        if [ "$i" -eq "$_cc_menu_sel" ]; then
+            printf "  \033[36m▶ \033[1m%-14s\033[0m  \033[2m%s\033[0m\n" \
+                "${_cc_menu_names[$i]}" "${_cc_menu_display[$i]}"
+        else
+            printf "    %-14s  \033[2m%s\033[0m\n" \
+                "${_cc_menu_names[$i]}" "${_cc_menu_display[$i]}"
+        fi
+    done
+}
 
-    # Carrega aliases
-    local names=() models=()
+_cc_pick_model() {
+    _cc_menu_names=("padrao")
+    _cc_menu_values=("")
+    _cc_menu_display=("sem override")
+
     if [ -s "$_CC_RUN_FILE" ]; then
         while IFS='=' read -r n m; do
-            names+=("$n"); models+=("$m")
+            _cc_menu_names+=("$n")
+            _cc_menu_values+=("$m")
+            _cc_menu_display+=("$m")
         done < "$_CC_RUN_FILE"
     fi
 
-    printf "\n${B}Escolha o modelo OpenRouter${R}\n\n"
-    printf "  ${D}0)${R} padrao ${D}(sem override)${R}\n"
-    local i
-    for i in "${!names[@]}"; do
-        printf "  ${Y}%d)${R} %-14s ${D}%s${R}\n" "$((i+1))" "${names[$i]}" "${models[$i]}"
+    _cc_menu_names+=("manual")
+    _cc_menu_values+=("__manual__")
+    _cc_menu_display+=("digitar modelo")
+
+    local count=${#_cc_menu_names[@]}
+    _cc_menu_sel=0
+
+    printf "\n\033[1mEscolha o modelo OpenRouter\033[0m\n\n"
+    tput civis 2>/dev/null
+    _cc_draw_menu
+
+    while true; do
+        local k
+        IFS= read -rsn1 k
+        if [[ "$k" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 k
+            case "$k" in
+                '[A') ((_cc_menu_sel > 0)) && ((_cc_menu_sel--)) ;;
+                '[B') ((_cc_menu_sel < count-1)) && ((_cc_menu_sel++)) ;;
+            esac
+        elif [[ "$k" == "" ]]; then
+            break
+        fi
+        tput cuu "$count" 2>/dev/null
+        _cc_draw_menu
     done
-    printf "  ${D}m)${R} digitar modelo manualmente\n"
-    printf "\n${C}>${R} "
 
-    local choice
-    read -r choice
-
-    case "$choice" in
-        0|"")
-            unset ANTHROPIC_MODEL
-            printf "${D}modelo padrao${R}\n"
-            ;;
-        m|M)
-            printf "modelo: "
-            read -r ANTHROPIC_MODEL
-            export ANTHROPIC_MODEL
-            printf "✓ ${ANTHROPIC_MODEL}\n"
-            ;;
-        *)
-            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ]; then
-                export ANTHROPIC_MODEL="${models[$((choice-1))]}"
-                printf "✓ ${names[$((choice-1))]} → ${ANTHROPIC_MODEL}\n"
-            else
-                printf "${D}opcao invalida, usando padrao${R}\n"
-                unset ANTHROPIC_MODEL
-            fi
-            ;;
-    esac
+    tput cnorm 2>/dev/null
     printf "\n"
+
+    local chosen="${_cc_menu_values[$_cc_menu_sel]}"
+    if [ "$chosen" = "__manual__" ]; then
+        printf "modelo: "
+        read -r chosen
+    fi
+
+    if [ -z "$chosen" ]; then
+        unset ANTHROPIC_MODEL
+        printf "\033[2mmodelo padrao\033[0m\n\n"
+    else
+        export ANTHROPIC_MODEL="$chosen"
+        printf "✓ \033[36m%s\033[0m\n\n" "$chosen"
+    fi
+
+    unset _cc_menu_names _cc_menu_values _cc_menu_display _cc_menu_sel
 }
 
 _cc_oauth() {
